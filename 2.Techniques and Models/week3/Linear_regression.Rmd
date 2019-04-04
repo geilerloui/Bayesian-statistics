@@ -1,0 +1,710 @@
+---
+title: 'Lesson7: Linear regression'
+author: "louis"
+date: "29 août 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Lesson 7: Linear regression
+
+### Lesson 7.2
+
+#### Data
+
+As an example of linear regression, we'll look at the Leinhardt data from the car package in  R.
+
+```{r}
+library("car")
+data("Leinhardt")
+#?Leinhardt
+head(Leinhardt)
+```
+
+
+```{r }
+str(Leinhardt)
+```
+
+```{r }
+pairs(Leinhardt)
+```
+
+We'll start with a simple linear regression model that relates infant mortality to per capita income.
+
+```{r }
+plot(infant ~ income, data=Leinhardt)
+```
+
+```{r }
+hist(Leinhardt$infant)
+```
+
+```{r }
+hist(Leinhardt$income)
+```
+
+```{r }
+Leinhardt$loginfant = log(Leinhardt$infant)
+Leinhardt$logincome = log(Leinhardt$income)
+
+plot(loginfant ~ logincome, data=Leinhardt)
+```
+
+Since infant mortality and per capita income are positive and right-skewed quantities, we consider modeling them on the logarithmic scale. A linear model appears much more appropriate on this scale.
+
+
+#### Modeling
+
+The reference Bayesian analysis (with a noninformative prior) is available directly in R.
+
+```{r }
+lmod = lm(loginfant ~ logincome, data=Leinhardt)
+summary(lmod)
+```
+
+### Leson 7.3
+
+#### Model in JAGS
+
+Now we'll fit this model in JAGS. A few countries have missing values, and for simplicity, we will omit those.
+
+```{r }
+dat = na.omit(Leinhardt)
+
+library("rjags")
+```
+
+Pour rappel, on modèlise les modèles JAGS comme un modèle hiérarchique, on commence par le haut (posterior distribution) pour finir par les prior.
+
+On appelle la loi normal $y_i| \mu ~ N(\mu,prec)$, le second paramètre est la précision et non pas la variance classique. On va aussi appeler le second paramètre $E[X]=\beta_0 + \beta_1 * log\_income_i$
+
+Le symbole ~ signifie que la valeur suit une lois de probabilité.
+
+On va ensuite tirer les priors pour b qui suivent une lois normale
+
+et enfin une précision avec gamma.
+
+On dit que la précision est $\taux = 1/ \sigma^2$, on la définit aussi comme "la distribution gamma peut être utilisé comme conjugate prior precision", peut être plus interssant car il explique comment les données sont concentrés autours de la moyenne, plutôt qu'une mesure de dispersion
+
+
+
+```{r}
+mod1_string = " model {
+    for (i in 1:n) {
+        y[i] ~ dnorm(mu[i], prec)
+        mu[i] = b[1] + b[2]*log_income[i] 
+    }
+    
+    for (i in 1:2) {
+        b[i] ~ dnorm(0.0, 1.0/1.0e6)
+    }
+    
+    prec ~ dgamma(5/2.0, 5*10.0/2.0)
+    sig2 = 1.0 / prec
+    sig = sqrt(sig2)
+} "
+
+set.seed(72)
+# on définit les inputs
+data1_jags = list(y=dat$loginfant, n=nrow(dat), 
+              log_income=dat$logincome)
+# on écrit les paramètres à estimer
+params1 = c("b", "sig")
+
+# on définit une fonction pour définir les valeurs à t=0
+inits1 = function() {
+    inits = list("b"=rnorm(2,0.0,100.0), "prec"=rgamma(1,1.0,1.0))
+}
+# on va compiler le modéle, l'argument 1 est le modèle en string, qui est généralement dans un fichier
+# mais ici on l'a déjà codé en haut, on doit écrire textConnection
+# le second param est les donnée, puis les données initiales et le nombre de chaînes
+mod1 = jags.model(textConnection(mod1_string), data=data1_jags, inits=inits1, n.chains=3)
+
+# 3. Run the MCMC sampler
+# 2nd param: combien d'itérations on veut pr l'update, ici 1000
+# il lance le mcmc snas sauvegarder la chaînes
+update(mod1, 1000) # burn-in
+
+# on doit lui dire combien d'itérations MCMC on veut
+# ca va en gros continuer après les 1000 itérations déjà faite
+mod1_sim = coda.samples(model=mod1,
+                        variable.names=params1,
+                        n.iter=5000)
+
+mod1_csim = do.call(rbind, mod1_sim) # combine multiple chains
+```
+
+
+### Leson 7.3
+
+#### MCMC convergence
+
+Before we check the inferences from the model, we should perform convergence diagnostics for our Markov chains.
+
+```{r }
+plot(mod1_sim)
+```
+
+```{r }
+gelman.diag(mod1_sim)
+```
+
+```{r }
+autocorr.diag(mod1_sim)
+```
+
+```{r }
+autocorr.plot(mod1_sim)
+```
+
+```{r }
+effectiveSize(mod1_sim)
+```
+
+We can get a posterior summary of the parameters in our model.
+
+```{r }
+summary(mod1_sim)
+```
+
+Don't forget that these results are for a regression model relating the logarithm of infant mortality to the logarithm of income.
+
+#### Residual checks
+
+Checking residuals (the difference between the response and the model's prediction for that value) is important with linear models since residuals can reveal violations of the assumptions we made to specify the model. In particular, we are looking for any sign that the model is not linear, normally distributed, or that the observations are not independent (conditional on covariates).
+
+First, let's look at what would have happened if we fit the reference linear model to the un-transformed variables.
+
+
+```{r }
+lmod0 = lm(infant ~ income, data=Leinhardt)
+plot(resid(lmod0)) # to check independence (looks okay)
+```
+
+On voit que les donées semblent bien dispersé
+
+```{r }
+plot(predict(lmod0), resid(lmod0)) # to check for linearity, constant variance (looks bad)
+```
+
+Dans ce cas cas le modèle est très mauvais, pour les faibles prédictions la variance est faible puis elle explose vers les prédictions de 100
+
+```{r }
+qqnorm(resid(lmod0)) # to check Normality assumption (we want this to be a straight line)
+```
+
+Now let's return to our model fit to the log-transformed variables. In a Bayesian model, we have distributions for residuals, but we'll simplify and look only at the residuals evaluated at the posterior mean of the parameters.
+
+
+```{r }
+X = cbind(rep(1.0, data1_jags$n), data1_jags$log_income)
+head(X)
+```
+
+
+```{r }
+(pm_params1 = colMeans(mod1_csim)) # posterior mean
+
+```
+
+```{r }
+yhat1 = drop(X %*% pm_params1[1:2])
+resid1 = data1_jags$y - yhat1
+plot(resid1) # against data index
+```
+
+```{r }
+plot(yhat1, resid1) # against predicted values
+
+```
+
+```{r }
+qqnorm(resid1) # checking normality of residuals
+
+```
+
+
+```{r }
+plot(predict(lmod), resid(lmod)) # to compare with reference linear model
+```
+
+```{r }
+qqnorm(resid1) # checking normality of residuals
+
+```
+
+```{r }
+rownames(dat)[order(resid1, decreasing=TRUE)[1:5]] # which countries have the largest positive residuals?
+```
+
+The residuals look pretty good here (no patterns, shapes) except for two strong outliers, Saudi Arabia and Libya. When outliers appear, it is a good idea to double check that they are not just errors in data entry. If the values are correct, you may reconsider whether these data points really are representative of the data you are trying to model. If you conclude that they are not (for example, they were recorded on different years), you may be able to justify dropping these data points from the data set.
+
+If you conclude that the outliers are part of data and should not be removed, we have several modeling options to accommodate them. We will address these in the next segment.
+
+### Quizz lesson 7 part A:
+
+```{r}
+library(car)
+data("Anscombe")
+head(Anscombe)
+pairs(Anscombe)
+```
+
+On peut lire que education et income semble fortement corrélés
+
+```{r }
+lmod = lm(education ~ ., data=Anscombe)
+summary(lmod)
+```
+ 
+We run it with JAGS this time:
+
+```{r }
+library("rjags")
+
+mod_string = " model {
+    for (i in 1:length(education)) {
+        education[i] ~ dnorm(mu[i], prec)
+        mu[i] = b0 + b[1]*income[i] + b[2]*young[i] + b[3]*urban[i]
+    }
+    
+    b0 ~ dnorm(0.0, 1.0/1.0e6)
+    for (i in 1:3) {
+        b[i] ~ dnorm(0.0, 1.0/1.0e6)
+    }
+    
+    prec ~ dgamma(1.0/2.0, 1.0*1500.0/2.0)
+    	## Initial guess of variance based on overall
+    	## variance of education variable. Uses low prior
+    	## effective sample size. Technically, this is not
+    	## a true 'prior', but it is not very informative.
+    sig2 = 1.0 / prec
+    sig = sqrt(sig2)
+} "
+
+set.seed(64)
+data_jags = as.list(Anscombe)
+
+params1 = c("b","sig")
+
+inits1 = function(){
+  inits = list("b"=rnorm(3,0.0,100.0), "prec"=rgamma(1,1.0,1.0))
+}
+
+mod1 = jags.model(textConnection(mod_string),
+                  data = data_jags,
+                  inits=inits1,
+                  n.chains=3)
+
+```
+
+```{r }
+update(mod1, 1000) # burn-in
+
+mod1_sim = coda.samples(model=mod1,
+                        variable.names=params1,
+                        n.iter=10000)
+
+mod1_csim = do.call(rbind, mod1_sim) # combine multiple chains
+```
+
+```{r }
+plot(mod1_sim)
+```
+
+```{r }
+gelman.diag(mod1_sim)
+```
+On observe que la valeur de gelman est plutôt bonnne
+
+```{r }
+autocorr.diag(mod1_sim)
+```
+
+
+```{r }
+autocorr.plot(mod1_sim)
+```
+
+On peut noter que l'autocorrélation pour les trois variables bi est très importante, il faudrait augmenter le nombre d'itérations, je suis passé de 5000 à 100.000 pas de changement majeur
+
+```{r }
+plot(lmod)
+# here mod_lm is the object saved when you run lm()
+```
+
+### Leson 7.5
+
+In the previous segment, we saw two outliers in the model relating the logarithm of infant mortality to the logarithm of income. Here we will discuss options for when we conclude that these outliers belong in the data set.
+
+
+#### Additional covariates
+
+The first approach is to look for additional covariates (or explanatory variables) that may be able to explain the outliers. For example, there could be a number of variables that provide information about infant mortality above and beyond what income provides as an explanation
+
+Looking back at our data, there are two variables we haven't used yet: region and oil. The oil variable indicates oil-exporting countries. Both Saudi Arabia and Libya are oil-exporting countries, so perhaps this might explain part of the anomaly.
+
+
+```{r }
+library("rjags")
+
+# we include the indicator variable is_oil (new_variable), ajout dummy variable
+mod2_string = " model {
+    for (i in 1:length(y)) {
+        y[i] ~ dnorm(mu[i], prec)
+        mu[i] = b[1] + b[2]*log_income[i] + b[3]*is_oil[i]
+    }
+    
+    for (i in 1:3) {
+        b[i] ~ dnorm(0.0, 1.0/1.0e6)
+    }
+    
+    prec ~ dgamma(5/2.0, 5*10.0/2.0)
+    sig = sqrt( 1.0 / prec )
+} "
+
+
+set.seed(73)
+# nouveauté: on crée une variable indicator, avec yes et no (yes=1,no=0)
+data2_jags = list(y=dat$loginfant, log_income=dat$logincome,
+                  is_oil=as.numeric(dat$oil=="yes"))
+data2_jags$is_oil
+
+```
+
+
+```{r }
+params2 = c("b", "sig")
+
+inits2 = function() {
+    inits = list("b"=rnorm(3,0.0,100.0), "prec"=rgamma(1,1.0,1.0))
+}
+
+mod2 = jags.model(textConnection(mod2_string), data=data2_jags, inits=inits2, n.chains=3)
+
+```
+
+```{r }
+# 1000 iterations de burn in
+update(mod2, 1e3) # burn-in
+
+mod2_sim = coda.samples(model=mod2,
+                        variable.names=params2,
+                        n.iter=5e3)
+
+mod2_csim = as.mcmc(do.call(rbind, mod2_sim)) # combine multiple chains
+```
+As usual, check the convergence diagnostics.
+
+
+```{r }
+summary(mod2_sim)
+```
+Remarque: on devrait toujours vérifier la convergence, mais dans ce cas la pour économiser du temps on va regarder d'autres facteurs.
+
+Regardons le posterior chain.
+
+Il y'a peu de changement par rapport au modèle d'avant (sans le oil), l'intercept est très similaire, la valeur de l'income (b[2]) n'a pas trop changé, et on voit une relation positive  entre oil production et le log de mortalité infantile, mais on ne peut pas dire qu'elles sont corrélés, car ce ne sont pas des données observé. (explication en bas)
+
+
+```{r }
+plot(mod2_sim)
+```
+
+```{r }
+gelman.diag(mod2_sim)
+autocorr.diag(mod2_sim)
+
+autocorr.plot(mod2_sim)
+```
+
+
+```{r }
+effectiveSize(mod2_sim)
+```
+
+We can get a posterior summary of the parameters in our model.
+
+```{r }
+summary(mod2_sim)
+```
+
+It looks like there is a positive relationship between oil-production and log-infant mortality. Because these data are merely observational, we cannot say that oil-production causes an increase in infant mortality (indeed that most certainly isn't the case), but we can say that they are positively correlated.
+
+Now let's check the residuals.
+
+```{r }
+X2 = cbind(rep(1.0, data1_jags$n), data2_jags$log_income, data2_jags$is_oil)
+head(X2)
+```
+
+
+
+```{r }
+(pm_params2 = colMeans(mod2_csim)) # posterior mean
+```
+
+```{r }
+yhat2 = drop(X2 %*% pm_params2[1:3])
+resid2 = data2_jags$y - yhat2
+plot(resid2) # against data index
+```
+
+on va comparer les residuals du nouveau modèle et du précédent
+```{r }
+par(mfrow=c(2,1))
+plot(yhat2, resid2) # against predicted values
+plot(yhat1, resid1) # residuals from the first model
+```
+ meilleur résiduals , les anciens outliesr sont plus dans le stream des données, on a un sd de 0.64, les outliers sont a plus que 2sd de la moyenne, 0.64 signifie 3 sd au dessus de la moyenne
+
+```{r }
+sd(resid2) # standard deviation of residuals
+```
+
+These look much better, although the residuals for Saudi Arabia and Libya are still more than three standard deviations away from the mean of the residuals. We might consider adding the other covariate region, but instead let's look at another option when we are faced with strong outliers.
+
+
+#### t likelihood
+
+Let's consider changing the likelihood. The normal likelihood has thin tails (almost all of the probability is concentrated within the first few standard deviations from the mean). This does not accommodate outliers well. Consequently, models with the normal likelihood might be overly-influenced by outliers. Recall that the $t$ distribution is similar to the normal distribution, but it has thicker tails which can accommodate outliers.
+
+The $t$ linear model might look something like this. Notice that the tt distribution has three parameters, including a positive "degrees of freedom" parameter. The smaller the degrees of freedom, the heavier the tails of the distribution. We might fix the degrees of freedom to some number, or we can assign it a prior distribution.
+
+```{r }
+mod3_string = " model {
+    for (i in 1:length(y)) {
+        params:taux=inverse scale parameter
+        df: degrees of freedom, the smaller the degrees the heavier the tail of the t distrib
+        y[i] ~ dt( mu[i], tau, df )
+        mu[i] = b[1] + b[2]*log_income[i] + b[3]*is_oil[i]
+    }
+    
+    for (i in 1:3) {
+        b[i] ~ dnorm(0.0, 1.0/1.0e6)
+    }
+    
+    df = nu + 2.0 # we want degrees of freedom > 2 to guarantee existence of mean and variance
+# les degrees of freedom doivent être positif donc on leur donnera une loi exponentiel
+    nu ~ dexp(1.0)
+    
+    tau ~ dgamma(5/2.0, 5*10.0/2.0) # tau is close to, but not equal to the precision
+# inverse scale: related to the sig
+    sig = sqrt( 1.0 / tau * df / (df - 2.0) ) # standard deviation of errors
+} "
+
+
+```
+
+As a side note: we should be aware that the prior df=exo(1.0) does not have a mean and a variance if the degrees of freedom are less than 2, that can happen under this model, if we want to force the $t$ to have a degrees of freedom we can define a new variable here, $df = \nu + 2.0$.  
+We will leave it up to you to fit this model.
+
+
+### Leson 7.6
+
+#### Compare models using Deviance Information Criterion
+
+We have now proposed three different models. How do we compare their performance on our data? In the previous course, we discussed estimating parameters in models using the maximum likelihood method. Similarly, we can choose between competing models using the same idea.
+
+We will use a quantity known as the deviance information criterion (DIC). It essentially calculates the posterior mean of the log-likelihood and adds a penalty for model complexity.
+
+Let's calculate the DIC for our first two models:
+
+the simple linear regression on log-income,
+
+
+
+```{r }
+# it samples from a posterior distribution, so we need iterations
+dic.samples(mod1, n.iter=1e3)
+```
+
+and the second model where we add oil production.
+
+```{r }
+# we added oil for this model
+dic.samples(mod2, n.iter=1e3)
+```
+
+The first number is the Monte Carlo estimated posterior mean deviance, which equals $-2$ times the log-likelihood (plus a constant that will be irrelevant for comparing models). Because of that $-2$ factor, a smaller deviance means a higher likelihood.
+
+Next, we are given a penalty for the complexity of our model. This penalty is necessary because we can always increase the likelihood of the model by making it more complex to fit the data exactly. We don't want to do this because over-fit models generalize poorly. This penalty is roughly equal to the effective number of parameters in your model. You can see this here. With the first model, we had a variance parameter and two betas, for a total of three parameters close to the 2.8 we go here. In the second model, we added one more beta for the oil effect. reflected which we can see on the penalty
+
+We add these two quantities to get the DIC-penalized deviance (the last number). The better-fitting model has a lower DIC value. In this case, the gains we receive in deviance by adding the is_oil covariate outweigh the penalty for adding an extra parameter. The final DIC for the second model is lower than for the first, so we would prefer using the second model.
+
+The gains we receive in deviance by adding the is_oil covariates outweigh the penalty for adding that extra parameter to our model. The final DIC for 2nd model ie lower for the first, so we'll prefer the second model
+
+We encourage you to explore different model specifications and compare their fit to the data using DIC. Wikipedia provides a good introduction to DIC and we can find more details about the JAGS implementation through the rjags package documentation by entering  ?dic.samples in the R console.
+We might try fitting the model with the t model, and compare the results
+
+
+### Quizz sur DIC
+
+```{r }
+# we added oil for this model
+dic.samples(mod1, n.iter=1e5)
+```
+
+on va comparer deux modèles:
+
+
+1. On enléve le prédictor urban
+2. En plus d'enlever urban on va rajouter un interaction terme $\beta_3 \times income \times youth$
+
+Faire un fit avec JAGS et calculer le DIC pour chacun. Si la performance de prédiction est notre critère, quel modèle réussi le mieux ?
+
+
+
+1. modèle 1:
+
+```{r }
+# we added oil for this model
+mod_string = " model {
+    for (i in 1:length(education)) {
+        education[i] ~ dnorm(mu[i], prec)
+        mu[i] = b0 + b[1]*income[i] + b[2]*young[i]
+    }
+    
+    b0 ~ ddexp(0.0, 2.0)
+    for (i in 1:2) {
+        b[i] ~ ddexp(0.0, 2.0)
+    }
+    
+    prec ~ dgamma(1.0/2.0, 1.0*1500.0/2.0)
+        ## Initial guess of variance based on overall
+        ## variance of education variable. Uses low prior
+        ## effective sample size. Technically, this is not
+        ## a true 'prior', but it is not very informative.
+    sig2 = 1.0 / prec
+    sig = sqrt(sig2)
+} "
+
+set.seed(64)
+data_jags = as.list(Anscombe)
+
+params1 = c("b","sig")
+
+inits1 = function(){
+  inits = list("b"=rnorm(2,0.0,100.0), "prec"=rgamma(1,1.0,1.0))
+}
+
+mod_without_urban = jags.model(textConnection(mod_string),
+                  data = data_jags,
+                  inits=inits1,
+                  n.chains=3)
+
+dic.samples(mod_without_urban, n.iter=1e5)
+```
+
+```{r }
+# we added oil for this model
+mod_string = " model {
+    for (i in 1:length(education)) {
+        education[i] ~ dnorm(mu[i], prec)
+        mu[i] = b0 + b[1]*income[i] + b[2]*young[i] + b[3] * income[i] * young[i]
+    }
+    
+    b0 ~ dnorm(0.0, 1.0/1.0e6)
+    for (i in 1:3) {
+        b[i] ~ dnorm(0.0, 1.0/1.0e6)
+    }
+    
+    prec ~ dgamma(1.0/2.0, 1.0*1500.0/2.0)
+        ## Initial guess of variance based on overall
+        ## variance of education variable. Uses low prior
+        ## effective sample size. Technically, this is not
+        ## a true 'prior', but it is not very informative.
+    sig2 = 1.0 / prec
+    sig = sqrt(sig2)
+} "
+
+set.seed(64)
+data_jags = as.list(Anscombe)
+
+params1 = c("b","sig")
+
+inits1 = function(){
+  inits = list("b"=rnorm(3,0.0,100.0), "prec"=rgamma(1,1.0,1.0))
+}
+
+mod_interaction_without_urban = jags.model(textConnection(mod_string),
+                  data = data_jags,
+                  inits=inits1,
+                  n.chains=3)
+
+dic.samples(mod_interaction_without_urban, n.iter=1e5)
+```
+
+
+Le modèle chois est donc le premier, qui a la plus faible DIC
+
+```{r }
+summary(mod1_sim)
+```
+
+
+
+# Bonus QUizz
+
+```{r }
+library("car")
+data("Anscombe")
+head(Anscombe)
+
+Xc <- scale(Anscombe, center=TRUE, scale=TRUE)
+str(Xc)
+
+data_jags <- as.list(data.frame(Xc))
+
+library("rjags")
+
+
+mod_string = " model {
+    for (i in 1:length(education)) {
+        education[i] ~ dnorm(mu[i], prec)
+        mu[i] = b0 + b[1]*income[i] + b[2]*young[i] + b[3]*urban[i]
+    }
+    
+    b0 ~ dnorm(0.0, 1.0/1.0e6)
+    for (i in 1:3) {
+        b[i] ~ dnorm(0.0, 1.0/1.0e6)
+    }
+    
+    prec ~ dgamma(1.0/2.0, 1.0*1500.0/2.0)
+    	## Initial guess of variance based on overall
+    	## variance of education variable. Uses low prior
+    	## effective sample size. Technically, this is not
+    	## a true 'prior', but it is not very informative.
+    sig2 = 1.0 / prec
+    sig = sqrt(sig2)
+} "
+
+set.seed(64)
+data_jags = as.list(Anscombe)
+
+params1 = c("b","sig")
+
+inits1 = function(){
+  inits = list("b"=rnorm(3,0.0,100.0), "prec"=rgamma(1,1.0,1.0))
+}
+
+mod1 = jags.model(textConnection(mod_string),
+                  data = data_jags,
+                  inits=inits1,
+                  n.chains=3)
+
+update(mod1, 1000) # burn-in
+
+mod1_sim = coda.samples(model=mod1,
+                        variable.names=params1,
+                        n.iter=10000)
+
+mod1_csim = do.call(rbind, mod1_sim) # combine multiple chains
+
+
+plot(mod1_sim)
+```

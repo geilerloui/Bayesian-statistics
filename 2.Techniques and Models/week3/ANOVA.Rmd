@@ -1,0 +1,371 @@
+---
+title: "ANOVA"
+author: "louis"
+date: "31 août 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Lesson 8: ANOVA
+### Lesson 8.2
+
+#### Data
+
+As an example of a one-way ANOVA, we'll look at the Plant Growth data in R.
+
+
+```{r }
+data("PlantGrowth")
+head(PlantGrowth)
+```
+
+Because the explanatory variable group is a factor and not continuous, we choose to visualize the data with box plots rather than scatter plots.
+
+```{r }
+boxplot(weight ~ group, data=PlantGrowth)
+```
+
+The box plots summarize the distribution of the data for each of the three groups. It appears that treatment 2 has the highest mean yield. It might be questionable whether each group has the same variance, but we'll assume that is the case.
+
+#### Modeling
+
+Again, we can start with the reference analysis (with a noninformative prior) with a linear model in R.
+
+```{r }
+lmod = lm(weight ~ group, data=PlantGrowth)
+summary(lmod)
+```
+Pour rappel, les résultats qu'on obtient sont les posterior mean estimates dans "estimate" 
+On lance le modèle linéaire et on fait un summary
+le premier groupe est l'intercept est le contrôle groupe c'est le mean yield pr le controle groupe
+les deux autres groupres, donnent la modification par rapport au groupe de contrôle intercept 
+
+on voit que la moyenne est à -0.3710, donc ca fait une moyenne de 4.6 entre le controle et le groupe 2 et pour groupe 2, 5.5
+
+
+```{r }
+anova(lmod)
+```
+
+on peut calculer la table anova donne le résultat pour chaque factor variable, pr savoir si il contribue fortement a la variabilité des données:
+
+- mean sq de group donne la variabilité between the factors
+- mean sq de residuals calcule le within the factors
+si ce ratio est important les factors variables contribuent significativement à la variabilité de données.
+La F-value calcule ce ratio between/within 
+La p value est faible elle n'est donc pas significative.
+
+
+```{r }
+# plot(lmod) # for graphical residual analysis
+
+```
+
+The default model structure in R is the linear model with dummy indicator variables. Hence, the "intercept" in this model is the mean yield for the control group. The two other parameters are the estimated effects of treatments 1 and 2. To recover the mean yield in treatment group 1, you would add the intercept term and the treatment 1 effect. To see how R sets the model up, use the  model.matrix(lmod) function to extract the $X$ matrix.
+
+The anova() function in R compares variability of observations between the treatment groups to variability within the treatment groups to test whether all means are equal or whether at least one is different. The small p-value here suggests that the means are not all equal.
+
+Let's fit the cell means model in JAGS.
+
+```{r }
+library("rjags")
+```
+
+avec le modèle jaggs on va utiliser le cell modèle, ou chaque groupe a sa propre mean
+
+```{r }
+mod_string = " model {
+# on calcule le likelihood
+# la variable grp va nous faire comparer groupe 1 et2 ou 0 et 3 ...
+    for (i in 1:length(y)) {
+        # on définit un mu pour chaque groupe
+        y[i] ~ dnorm(mu[grp[i]], prec)
+    }
+   # non informative prior 
+    for (j in 1:3) {
+        mu[j] ~ dnorm(0.0, 1.0/1.0e6)
+    }
+    # pr variance on a gamma, five observation as ou effective sample size
+    prec ~ dgamma(5/2.0, 5*1.0/2.0)
+    sig = sqrt( 1.0 / prec )
+} "
+
+set.seed(82)
+str(PlantGrowth)
+# on doit transformer la variable groupe, en numérique (grp)
+data_jags = list(y=PlantGrowth$weight, 
+              grp=as.numeric(PlantGrowth$group))
+
+params = c("mu", "sig")
+
+inits = function() {
+    inits = list("mu"=rnorm(3,0.0,100.0), "prec"=rgamma(1,1.0,1.0))
+}
+
+mod = jags.model(textConnection(mod_string), data=data_jags, inits=inits, n.chains=3)
+# 1e03 iteration burn in
+update(mod, 1e3)
+
+mod_sim = coda.samples(model=mod,
+                        variable.names=params,
+                        n.iter=5e3)
+mod_csim = as.mcmc(do.call(rbind, mod_sim)) # combined chains
+```
+
+
+#### Model checking
+
+As usual, we check for convergence of our MCMC.
+
+
+```{r }
+plot(mod_sim)
+
+# tres bon resulttat 1
+gelman.diag(mod_sim)
+# pas de problem, donc l'effective sample size sera grande proche de la valeur réel de la chaîne
+autocorr.diag(mod_sim)
+# which is true with effective size
+effectiveSize(mod_sim)
+```
+We are confident with our 3 indicators
+We can also look at the residuals to see if there are any obvious problems with our model choice.
+
+```{r }
+(pm_params = colMeans(mod_csim))
+```
+on rgarde les posteriors means, on les compare avec les posteriors coefficient de notre analyse de référence
+
+```{r }
+coefficients(lmod)
+```
+
+les résultast sont plutôt cohérents, mu1, mu2 et mu3 sont très similaires
+
+```{r }
+# on les indexes par leurs groupes indicators [data_jags$grp], la variable groupe est la version numériques des trois groupes, on rappelle en dessous
+yhat = pm_params[1:3][data_jags$grp]
+
+```
+
+```{r }
+data_jags$grp
+```
+
+on affiche aussi y hat, qui nous montre que les mu1 ont bien une valeur de 5.03 comme calculé avant etc
+
+```{r }
+yhat
+```
+
+on regarde les residuals, on ne voit qu'il n'y a aucun pattern donc c'est bon
+
+```{r }
+resid = data_jags$y - yhat
+plot(resid)
+```
+
+on voit qu'il y'a trois sets de variables ce qui est logique avec nos trois facteurs
+après ce qui ressort fortmeent est que la variance du groupe à gauche, la résidual variance
+est bien plus forte que celle du groupe 3
+
+```{r }
+plot(yhat, resid)
+```
+
+Again, it might be appropriate to have a separate variance for each group. We will have you do that as an exercise.
+
+#### Results
+
+Let's look at the posterior summary of the parameters. on peut se demander quel est le 95% interval.
+
+cest compris entre 2.5% et 97.5% donc [4.59;5.49] pour le groupe 1
+
+```{r }
+summary(mod_sim)
+```
+
+
+
+```{r }
+HPDinterval(mod_csim)
+```
+
+on peut aussi changer et se demander quel est le 90% posterior probability intervals
+
+```{r }
+HPDinterval(mod_csim, 0.9)
+```
+
+######## quizzz
+
+```{r }
+mu1 <- HPDinterval(mod_csim[,1], 0.95)
+mu3 <- HPDinterval(mod_csim[,3], 0.95)
+
+mu3 - mu1
+```
+```
+
+```{r }
+print(class(mod_csim))
+print(mod_csim[c("mu[1]")])
+#HPDinterval(mod_csim[1], 0.9)
+```
+
+############# Quizz 2
+
+The HPDinterval() function in the coda package calculates intervals of highest posterior density for each parameter.
+
+We are interested to know if one of the treatments increases mean yield. It is clear that treatment 1 does not. What about treatment 2?
+
+One of the advantage of bayesian, is that it is easy to calculate posterior probabilities of hypothesis like this, is groupe 2 better than control group ?
+
+```{r }
+# le average gives the posterior probability
+mean(mod_csim[,3] > mod_csim[,1])
+```
+
+There is a high posterior probability that the mean yield for treatment 2 is greater than the mean yield for the control group.
+
+It may be the case that treatment 2 would be costly to put into production. Suppose that to be worthwhile, this treatment must increase mean yield by 10%. What is the posterior probability that the increase is at least that?
+
+```{r }
+mean(mod_csim[,3] > 1.1*mod_csim[,1])
+```
+
+
+We have about 50/50 odds that adopting treatment 2 would increase mean yield by at least 10%.
+
+## Quizz
+
+```{r }
+mod_string = " model {
+# on calcule le likelihood
+# la variable grp va nous faire comparer groupe 1 et2 ou 0 et 3 ...
+    for (i in 1:length(y)) {
+        y[i] ~ dnorm(mu[grp[i]], prec[grp[i]])
+    }
+   # non informative prior 
+    for (j in 1:3) {
+        mu[j] ~ dnorm(0.0, 1.0/1.0e6)
+    }
+    # pr variance on a gamma, five observation as ou effective sample size
+    for (j in 1:3){
+    prec[j] ~ dgamma(5/2.0, 5*1.0/2.0)
+    }
+    sig = sqrt( 1.0 / prec )
+} "
+
+data("PlantGrowth")
+set.seed(82)
+
+# on doit transformer la variable groupe, en numérique (grp)
+data_jags = list(y=PlantGrowth$weight, 
+              grp=as.numeric(PlantGrowth$group))
+
+params = c("mu", "sig")
+
+inits = function() {
+    inits = list("mu"=rnorm(3,0.0,100.0), "prec"=rgamma(3,1.0,1.0))
+}
+
+mod_quizz = jags.model(textConnection(mod_string), data=data_jags, inits=inits, n.chains=3)
+# 1e03 iteration burn in
+update(mod, 1e3)
+
+mod_sim_quizz = coda.samples(model=mod_quizz,
+                        variable.names=params,
+                        n.iter=5e3)
+mod_csim_quizz = as.mcmc(do.call(rbind, mod_sim_quizz)) # combined chains
+
+summary(mod_sim_quizz)
+
+```
+
+on compare leurs DIC
+
+```{r }
+# we added oil for this model
+dic2 <- dic.samples(mod_quizz, n.iter=1e5)
+```
+
+```{r }
+# we added oil for this model
+dic1 <- dic.samples(mod, n.iter=1e5)
+```
+
+```{r }
+# we added oil for this model
+dic1-dic2
+```
+
+on nous demande de calculer sur les anciennes données
+
+```{r }
+HPDinterval(mod_csim, 0.9)
+```
+
+
+########Bonus - quizzz multi ANOVA
+
+```{r }
+data("warpbreaks")
+
+mod3_string = " model {
+    for( i in 1:length(y)) {
+        y[i] ~ dnorm(mu[woolGrp[i], tensGrp[i]], prec[woolGrp[i], tensGrp[i]])
+    }
+    
+    for (j in 1:max(woolGrp)) {
+        for (k in 1:max(tensGrp)) {
+            mu[j,k] ~ dnorm(0.0, 1.0/1.0e6)
+        }
+    }
+    for (j in 1:max(woolGrp)) {
+        for (k in 1:max(tensGrp)) {    
+    prec[j,k] ~ dgamma(1/2, 1/2)
+        }
+    }
+    sig = sqrt(1.0 / prec)
+} "
+
+str(warpbreaks)
+
+data3_jags = list(y=log(warpbreaks$breaks), woolGrp=as.numeric(warpbreaks$wool), tensGrp=as.numeric(warpbreaks$tension))
+
+params3 = c("mu", "sig")
+
+mod3 = jags.model(textConnection(mod3_string), data=data3_jags, n.chains=3)
+update(mod3, 1e3)
+
+mod3_sim = coda.samples(model=mod3,
+                        variable.names=params3,
+                        n.iter=5e3)
+mod3_csim = as.mcmc(do.call(rbind, mod3_sim))
+
+plot(mod3_sim, ask=TRUE)
+
+## convergence diagnostics
+gelman.diag(mod3_sim)
+autocorr.diag(mod3_sim)
+effectiveSize(mod3_sim)
+raftery.diag(mod3_sim)
+
+
+```
+
+```{r }
+dic2 <- dic.samples(mod3, n.iter=1e5)
+```
+
+
+
+
+
+
+
+

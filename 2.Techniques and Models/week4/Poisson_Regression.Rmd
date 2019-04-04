@@ -1,0 +1,304 @@
+---
+title: "Poisson_Regression"
+author: "louis"
+date: "15 septembre 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Lesson 10: Poisson regression
+### Lesson 10.2
+### Data
+
+For an example of Poisson regression, we'll use the badhealth data set from the COUNT package in R.
+
+```{r}
+library("COUNT")
+```
+
+```{r}
+data("badhealth")
+#?badhealth
+head(badhealth)
+```
+
+```{r}
+any(is.na(badhealth))
+```
+
+As usual, let's visualize these data.
+
+```{r}
+hist(badhealth$numvisit, breaks=20)
+```
+
+```{r}
+plot(jitter(log(numvisit)) ~ jitter(age), data=badhealth, subset=badh==0, xlab="age", ylab="log(visits)")
+points(jitter(log(numvisit)) ~ jitter(age), data=badhealth, subset=badh==1, col="red")
+```
+
+### Model
+
+It appears that both age and bad health are related to the number of doctor visits. We should include model terms for both variables. If we believe the age/visits relationship is different between healthy and non-healthy populations, we should also include an interaction term. We will fit the full model here and leave it to you to compare it with the simpler additive model.
+
+```{r}
+library("rjags")
+```
+
+```{r}
+mod_string = " model {
+    for (i in 1:length(numvisit)) {
+        numvisit[i] ~ dpois(lam[i])
+        log(lam[i]) = int + b_badh*badh[i] + b_age*age[i] + b_intx*age[i]*badh[i]
+    }
+    
+    int ~ dnorm(0.0, 1.0/1e6)
+    b_badh ~ dnorm(0.0, 1.0/1e4)
+    b_age ~ dnorm(0.0, 1.0/1e4)
+    b_intx ~ dnorm(0.0, 1.0/1e4)
+} "
+
+set.seed(102)
+
+data_jags = as.list(badhealth)
+
+params = c("int", "b_badh", "b_age", "b_intx")
+
+mod = jags.model(textConnection(mod_string), data=data_jags, n.chains=3)
+update(mod, 1e3)
+
+mod_sim = coda.samples(model=mod,
+                        variable.names=params,
+                        n.iter=5e3)
+mod_csim = as.mcmc(do.call(rbind, mod_sim))
+
+## convergence diagnostics
+plot(mod_sim)
+
+gelman.diag(mod_sim)
+autocorr.diag(mod_sim)
+autocorr.plot(mod_sim)
+effectiveSize(mod_sim)
+
+## compute DIC
+dic = dic.samples(mod, n.iter=1e3)
+```
+
+### Model Checking
+
+To get a general idea of the model's performance, we can look at predicted values and residuals as usual. Don't forget that we must apply the inverse of the link function to get predictions for $\lambda$
+
+```{r}
+X = as.matrix(badhealth[,-1])
+X = cbind(X, with(badhealth, badh*age))
+head(X)
+```
+
+
+```{r}
+(pmed_coef = apply(mod_csim, 2, median))
+```
+
+```{r}
+llam_hat = pmed_coef["int"] + X %*% pmed_coef[c("b_badh", "b_age", "b_intx")]
+lam_hat = exp(llam_hat)
+
+hist(lam_hat)
+```
+
+
+```{r}
+resid = badhealth$numvisit - lam_hat
+plot(resid) # the data were ordered
+```
+
+```{r}
+plot(lam_hat, badhealth$numvisit)
+abline(0.0, 1.0)
+```
+
+```{r}
+plot(lam_hat[which(badhealth$badh==0)], resid[which(badhealth$badh==0)], xlim=c(0, 8), ylab="residuals", xlab=expression(hat(lambda)), ylim=range(resid))
+points(lam_hat[which(badhealth$badh==1)], resid[which(badhealth$badh==1)], col="red")
+```
+
+It is not surprising that the variability increases for values predicted at higher values since the mean is also the variance in the Poisson distribution. However, observations predicted to have about two visits should have variance about two, and observations predicted to have about six visits should have variance about six.
+
+```{r}
+var(resid[which(badhealth$badh==0)])
+```
+
+```{r}
+var(resid[which(badhealth$badh==1)])
+```
+
+Clearly this is not the case with these data. This indicates that either the model fits poorly (meaning the covariates don't explain enough of the variability in the data), or the data are "overdispersed" for the Poisson likelihood we have chosen. This is a common issue with count data. If the data are more variable than the Poisson likelihood would suggest, a good alternative is the negative binomial distribution, which we will not pursue here.
+
+### Lesson 10.3
+#### Results
+
+Assuming the model fit is adequate, we can interpret the results.
+
+```{r}
+summary(mod_sim)
+```
+
+The intercept is not necessarily interpretable here because it corresponds to a healthy 0-year-old, whereas the youngest person in the data set is 20 years old.
+
+For healthy individuals, it appears that age has a positive association with number of doctor visits. Clearly, bad health is associated with an increase in expected number of visits. The interaction coefficient is interpreted as an adjustment to the age coefficient for people in bad health. Hence, for people with bad health, age is essentially unassociated with number of visits.
+
+#### Predictive distributions
+
+Let's say we have two people aged 35, one in good health and the other in poor health. What is the posterior probability that the individual with poor health will have more doctor visits? This goes beyond the posterior probabilities we have calculated comparing expected responses in previous lessons. Here we will create Monte Carlo samples for the responses themselves. This is done by taking the Monte Carlo samples of the model parameters, and for each of those, drawing a sample from the likelihood. Let's walk through this.
+
+First, we need the $x$ values for each individual. We'll say the healthy one is Person 1 and the unhealthy one is Person 2. Their $x$ values are:
+
+```{r}
+x1 = c(0, 35, 0) # good health
+x2 = c(1, 35, 35) # bad health
+```
+
+The posterior samples of the model parameters are stored in mod_csim:
+
+```{r}
+head(mod_csim)
+```
+
+First, we'll compute the linear part of the predictor:
+
+```{r}
+loglam1 = mod_csim[,"int"] + mod_csim[,c(2,1,3)] %*% x1
+loglam2 = mod_csim[,"int"] + mod_csim[,c(2,1,3)] %*% x2
+```
+
+Next we'll apply the inverse link:
+
+```{r}
+lam1 = exp(loglam1)
+lam2 = exp(loglam2)
+```
+
+The final step is to use these samples for the $\lambda$ parameter for each individual and simulate actual number of doctor visits using the likelihood:
+
+```{r}
+(n_sim = length(lam1))
+```
+
+```{r}
+y1 = rpois(n=n_sim, lambda=lam1)
+y2 = rpois(n=n_sim, lambda=lam2)
+
+plot(table(factor(y1, levels=0:18))/n_sim, pch=2, ylab="posterior prob.", xlab="visits")
+points(table(y2+0.1)/n_sim, col="red")
+```
+
+Finally, we can answer the original question: What is the probability that the person with poor health will have more doctor visits than the person with good health?
+
+```{r}
+mean(y2 > y1)
+```
+
+Because we used our posterior samples for the model parameters in our simulation, this posterior predictive distribution on the number of visits for these two new individuals naturally takes into account our uncertainty in the model estimates. This is a more honest/realistic distribution than we would get if we had fixed the model parameters at their MLE or posterior means and simulated data for the new individuals.
+
+
+## Quizz
+
+```{r}
+library("COUNT")
+library("rjags")
+
+data("badhealth")
+
+mod_string = " model {
+    for (i in 1:length(numvisit)) {
+        numvisit[i] ~ dpois(lam[i])
+        log(lam[i]) = int + b_badh*badh[i] + b_age*age[i] + b_intx*age[i]*badh[i]
+    }
+    
+    int ~ dnorm(0.0, 1.0/1e6)
+    b_badh ~ dnorm(0.0, 1.0/1e4)
+    b_age ~ dnorm(0.0, 1.0/1e4)
+    b_intx ~ dnorm(0.0, 1.0/1e4)
+} "
+
+set.seed(102)
+
+data_jags = as.list(badhealth)
+
+params = c("int", "b_badh", "b_age", "b_intx")
+
+mod = jags.model(textConnection(mod_string), data=data_jags, n.chains=3)
+update(mod, 1e3)
+
+mod_sim = coda.samples(model=mod,
+                        variable.names=params,
+                        n.iter=5e3)
+mod_csim = as.mcmc(do.call(rbind, mod_sim))
+
+## convergence diagnostics
+plot(mod_sim)
+
+gelman.diag(mod_sim)
+autocorr.diag(mod_sim)
+autocorr.plot(mod_sim)
+effectiveSize(mod_sim)
+
+```
+
+```{r}
+## compute DIC
+dic = dic.samples(mod, n.iter=1e3)
+print(dic)
+```
+
+```{r}
+## compute DIC
+mod_string = " model {
+    for (i in 1:length(numvisit)) {
+        numvisit[i] ~ dpois(lam[i])
+        log(lam[i]) = int + b_badh*badh[i] + b_age*age[i]
+    }
+    
+    int ~ dnorm(0.0, 1.0/1e6)
+    b_badh ~ dnorm(0.0, 1.0/1e4)
+    b_age ~ dnorm(0.0, 1.0/1e4)
+} "
+
+set.seed(102)
+
+data_jags = as.list(badhealth)
+
+params = c("int", "b_badh", "b_age")
+
+mod = jags.model(textConnection(mod_string), data=data_jags, n.chains=3)
+update(mod, 1e3)
+
+mod_sim = coda.samples(model=mod,
+                        variable.names=params,
+                        n.iter=5e3)
+mod_csim = as.mcmc(do.call(rbind, mod_sim))
+
+dic2 = dic.samples(mod, n.iter=1e3)
+
+print(dic2)
+
+```
+
+```{r}
+dic2 - dic
+
+```
+
+```{r}
+ppois(21, 30)
+
+```
+
+
+```{r}
+dat <- read.csv(file = "data_quizz_poisson.csv", header=TRUE)
+head(dat)
+```

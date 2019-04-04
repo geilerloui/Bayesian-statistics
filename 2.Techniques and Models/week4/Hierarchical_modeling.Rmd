@@ -1,0 +1,456 @@
+---
+title: "Hierarchical_modeling"
+author: "louis"
+date: "17 septembre 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Lesson 11: Hierarchical modeling
+
+### Lesson 11.2
+
+#### Data
+
+Let's fit our hierarhical model for counts of chocolate chips. The data can be found in cookies.dat.
+
+```{r}
+dat = read.table(file="cookies.dat", header=TRUE)
+head(dat)
+```
+
+```{r}
+table(dat$location)
+```
+
+We can also visualize the distribution of chips by location.
+
+```{r}
+hist(dat$chips)
+```
+
+```{r}
+boxplot(chips ~ location, data=dat)
+```
+
+### Prior predictive checks
+
+Before implementing the model, we need to select prior distributions for $\alpha$ and $\beta$, the hyperparameters governing the gamma distribution for the $\lambda$ arameters. First, think about what the $\lambda$'s represent. For location , $\lambda_j$ is the expected number of chocolate chips per cookie. Hence, $\alpha$ and $\beta$ control the distribution of these means between locations. The mean of this gamma distribution will represent the overall mean of number of chips for all cookies. The variance of this gamma distribution controls the variability between locations. If this is high, the mean number of chips will vary widely from location to location. If it is small, the mean number of chips will be nearly the same from location to location.
+
+To see the effects of different priors on the distribution of $\lambda$'s, we can simulate. Suppose we try independent exponential priors for $\alpha$ and $\beta$.
+
+```{r}
+set.seed(112)
+n_sim = 500
+alpha_pri = rexp(n_sim, rate=1.0/2.0)
+beta_pri = rexp(n_sim, rate=5.0)
+mu_pri = alpha_pri/beta_pri
+sig_pri = sqrt(alpha_pri/beta_pri^2)
+
+summary(mu_pri)
+```
+
+```{r}
+summary(sig_pri)
+```
+
+After simulating from the priors for $\alpha$ and $\beta$, we can use those samples to simulate further down the hierarchy:
+
+```{r}
+lam_pri = rgamma(n=n_sim, shape=alpha_pri, rate=beta_pri)
+summary(lam_pri)
+```
+
+Or for a prior predictive reconstruction of the original data set:
+
+```{r}
+(lam_pri = rgamma(n=5, shape=alpha_pri[1:5], rate=beta_pri[1:5]))
+```
+
+```{r}
+(y_pri = rpois(n=150, lambda=rep(lam_pri, each=30)))
+```
+
+Because these priors have high variance and are somewhat noninformative, they produce unrealistic predictive distributions. Still, enough data would overwhelm the prior, resulting in useful posterior distributions. Alternatively, we could tweak and simulate from these prior distributions until they adequately represent our prior beliefs. Yet another approach would be to re-parameterize the gamma prior, which we'll demonstrate as we fit the model.
+
+### Lesson 11.3
+
+#### JAGS Model
+
+```{r}
+library("rjags")
+```
+
+```{r}
+mod_string = " model {
+for (i in 1:length(chips)) {
+  chips[i] ~ dpois(lam[location[i]])
+}
+
+for (j in 1:max(location)) {
+  lam[j] ~ dgamma(alpha, beta)
+}
+
+alpha = mu^2 / sig^2
+beta = mu / sig^2
+
+mu ~ dgamma(2.0, 1.0/5.0)
+sig ~ dexp(1.0)
+
+} "
+
+set.seed(113)
+
+data_jags = as.list(dat)
+
+params = c("lam", "mu", "sig")
+
+mod = jags.model(textConnection(mod_string), data=data_jags, n.chains=3)
+update(mod, 1e3)
+
+mod_sim = coda.samples(model=mod,
+                       variable.names=params,
+                       n.iter=5e3)
+mod_csim = as.mcmc(do.call(rbind, mod_sim))
+
+## convergence diagnostics
+plot(mod_sim)
+
+gelman.diag(mod_sim)
+autocorr.diag(mod_sim)
+autocorr.plot(mod_sim)
+effectiveSize(mod_sim)
+
+## compute DIC
+dic = dic.samples(mod, n.iter=1e3)
+```
+
+### Model Checking
+
+After assessing convergence, we can check the fit via residuals. With a hierarhcical model, there are now two levels of residuals: the observation level and the location mean level. To simplify, we'll look at the residuals associated with the posterior means of the parameters.
+
+First, we have observation residuals, based on the estimates of location means.
+
+```{r}
+## observation level residuals
+(pm_params = colMeans(mod_csim))
+```
+
+```{r}
+yhat = rep(pm_params[1:5], each=30)
+resid = dat$chips - yhat
+plot(resid)
+```
+
+```{r}
+plot(jitter(yhat), resid)
+```
+
+```{r}
+var(resid[yhat<7])
+```
+
+```{r}
+var(resid[yhat>11])
+```
+
+Also, we can look at how the location means differ from the overall mean $\mu$.
+
+```{r}
+## location level residuals
+lam_resid = pm_params[1:5] - pm_params["mu"]
+plot(lam_resid)
+abline(h=0, lty=2)
+```
+
+We don't see any obvious violations of our model assumptions.
+
+### Results
+
+```{r}
+summary(mod_sim)
+```
+
+#### Lesson 11.4
+
+#### Posterior predictive simulation
+
+Just as we did with the prior distribution, we can use these posterior samples to get Monte Carlo estimates that interest us from the posterior predictive distribution.
+
+For example, we can use draws from the posterior distribution of $\mu$ and $\sigma$ to simulate the posterior predictive distribution of the mean for a new location.
+
+```{r}
+(n_sim = nrow(mod_csim))
+```
+
+```{r}
+lam_pred = rgamma(n=n_sim, shape=mod_csim[,"mu"]^2/mod_csim[,"sig"]^2, 
+                  rate=mod_csim[,"mu"]/mod_csim[,"sig"]^2)
+hist(lam_pred)
+```
+
+
+```{r}
+mean(lam_pred > 15)
+```
+
+Using these $\lambda$ draws, we can go to the observation level and simulate the number of chips per cookie, which takes into account the uncertainty in $\lambda$:
+
+```{r}
+y_pred = rpois(n=n_sim, lambda=lam_pred)
+hist(y_pred)
+```
+
+```{r}
+mean(y_pred > 15)
+```
+
+```{r}
+hist(dat$chips)
+```
+
+Finally, we could answer questions like: what is the posterior probability that the next cookie produced in Location 1 will have fewer than seven chips?
+
+```{r}
+y_pred1 = rpois(n=n_sim, lambda=mod_csim[,"lam[1]"])
+hist(y_pred1)
+```
+
+```{r}
+mean(y_pred1 < 7)
+```
+
+#### Lesson 11.6
+
+#### Random intercept linear model
+
+We can extend the linear model for the Leinhardt data on infant mortality by incorporating the region variable. We'll do this with a hierarhcical model, where each region has its own intercept.
+
+```{r}
+library("car")
+data("Leinhardt")
+#?Leinhardt
+str(Leinhardt)
+```
+
+```{r}
+pairs(Leinhardt)
+```
+
+```{r}
+head(Leinhardt)
+```
+
+Previously, we worked with infant mortality and income on the logarithmic scale. Recall also that we had to remove some missing data.
+
+```{r}
+dat = na.omit(Leinhardt)
+dat$logincome = log(dat$income)
+dat$loginfant = log(dat$infant)
+str(dat)
+```
+
+Now we can fit the proposed model:
+
+```{r}
+library("rjags")
+
+mod_string = " model {
+  for (i in 1:length(y)) {
+    y[i] ~ dnorm(mu[i], prec)
+    mu[i] = a[region[i]] + b[1]*log_income[i] + b[2]*is_oil[i]
+  }
+  
+  for (j in 1:max(region)) {
+    a[j] ~ dnorm(a0, prec_a)
+  }
+  
+  a0 ~ dnorm(0.0, 1.0/1.0e6)
+  prec_a ~ dgamma(1/2.0, 1*10.0/2.0)
+  tau = sqrt( 1.0 / prec_a )
+  
+  for (j in 1:2) {
+    b[j] ~ dnorm(0.0, 1.0/1.0e6)
+  }
+  
+  prec ~ dgamma(5/2.0, 5*10.0/2.0)
+  sig = sqrt( 1.0 / prec )
+} "
+
+set.seed(116)
+data_jags = list(y=dat$loginfant, log_income=dat$logincome,
+                  is_oil=as.numeric(dat$oil=="yes"), region=as.numeric(dat$region))
+data_jags$is_oil
+table(data_jags$is_oil, data_jags$region)
+
+params = c("a0", "a", "b", "sig", "tau")
+
+mod = jags.model(textConnection(mod_string), data=data_jags, n.chains=3)
+update(mod, 1e3) # burn-in
+
+mod_sim = coda.samples(model=mod,
+                       variable.names=params,
+                       n.iter=5e3)
+
+mod_csim = as.mcmc(do.call(rbind, mod_sim)) # combine multiple chains
+
+## convergence diagnostics
+plot(mod_sim)
+
+gelman.diag(mod_sim)
+autocorr.diag(mod_sim)
+autocorr.plot(mod_sim)
+effectiveSize(mod_sim)
+```
+
+### Results
+
+Convergence looks okay, so let's compare this with the old model from Lesson 7 using DIC:
+
+```{r}
+dic.samples(mod, n.iter=1e3)
+```
+
+It appears that this model is an improvement over the non-hierarchical one we fit earlier. Notice that the penalty term, which can be interpreted as the "effective" number of parameters, is less than the actual number of parameters (nine). There are fewer "effective" parameters because they are "sharing" information or "borrowing strength" from each other in the hierarhical structure. If we had skipped the hierarchy and fit one intercept, there would have been four parameters. If we had fit separate, independent intercepts for each region, there would have been seven parameters (which is close to what we ended up with).
+
+Finally, let's look at the posterior summary.
+
+```{r}
+summary(mod_sim)
+```
+
+In this particular model, the intercepts do not have a real interpretation because they correspond to the mean response for a country that does not produce oil and has $0 log-income per capita (which is \$1 income per capita). We can interpret a0a0 as the overall mean intercept and $\tau$ as the standard deviation of intercepts across regions.
+
+#### Other models
+
+We have not investigated adding interaction terms, which might be appropriate. We only considered adding hierarchy on the intercepts, but in reality nothing prevents us from doing the same for other terms in the model, such as the coefficients for income and oil. We could try any or all of these alternatives and see how the DIC changes for those models. This, together with other model checking techniques we have discussed could be used to identify your best model that you can use to make inferences and predictions.
+
+### Quizz n°1
+
+```{r}
+dat <- read.csv(file="data1_quizzHierarchical.csv", header=TRUE)
+head(dat)
+```
+
+```{r}
+library("rjags")
+
+mod_string = " model {
+for (i in 1:length(y)) {
+  industry[i] ~ dnorm(theta[grp[i]], sig)
+}
+
+for (j in 1:max(grp)) {
+  theta[j] ~ dnorm(mu, tau)
+}
+
+mu ~ dnorm(0, 1e6)
+tau ~ dgamma(1/2, 3/2)
+sig ~ dgamma(1, 1)
+
+} "
+
+set.seed(113)
+
+data_jags = as.list(dat)
+
+params = c("theta", "mu", "sig", "tau")
+
+mod = jags.model(textConnection(mod_string), data=data_jags, n.chains=3)
+update(mod, 1e3)
+
+mod_sim = coda.samples(model=mod,
+                       variable.names=params,
+                       n.iter=5e3)
+mod_csim = as.mcmc(do.call(rbind, mod_sim))
+## convergence diagnostics
+plot(mod_sim)
+
+gelman.diag(mod_sim)
+autocorr.diag(mod_sim)
+autocorr.plot(mod_sim)
+effectiveSize(mod_sim)
+
+
+```
+
+```{r}
+# 
+# means_anova <- tapply(dat$y, INDEX=dat$grp, FUN=mean)
+# 
+# plot(means_anova)
+# points(theta, col = "red")
+
+```
+
+
+
+## Quizz Partie 2:
+
+
+```{r}
+library("rjags")
+
+library("MASS")
+data("OME")
+
+dat = subset(OME, OME != "N/A")
+dat$OME = factor(dat$OME) # relabel OME
+dat$ID = as.numeric(factor(dat$ID)) # relabel ID so there are no gaps in numbers (they now go from 1 to 63)
+
+## Original reference model and covariate matrix
+mod_glm = glm(Correct/Trials ~ Age + OME + Loud + Noise, data=dat, weights=Trials, family="binomial")
+X = model.matrix(mod_glm)[,-1]
+
+## Original model (that needs to be extended)
+mod_string = " model {
+	for (i in 1:length(y)) {
+		y[i] ~ dbin(phi[i], n[i])
+		logit(phi[i]) = b0 + b[1]*Age[i] + b[2]*OMElow[i] + b[3]*Loud[i] + b[4]*Noiseincoherent[i]
+	}
+	
+	b0 ~ dnorm(0.0, 1.0/5.0^2)
+	for (j in 1:4) {
+		b[j] ~ dnorm(0.0, 1.0/4.0^2)
+	}
+	
+} "
+
+data_jags = as.list(as.data.frame(X))
+data_jags$y = dat$Correct
+data_jags$n = dat$Trials
+data_jags$ID = dat$ID
+
+set.seed(116)
+data_jags = list(y=data_jags$y, Age=data_jags$Age, OMElow=data_jags$OMElow, Loud=data_jags$Loud, Noiseincoherent=data_jags$Noiseincoherent, n=data_jags$n)
+
+params = c("b0", "b")
+
+mod = jags.model(textConnection(mod_string), data=data_jags, n.chains=3)
+update(mod, 1e3) # burn-in
+
+mod_sim = coda.samples(model=mod,
+                       variable.names=params,
+                       n.iter=5e3)
+
+mod_csim = as.mcmc(do.call(rbind, mod_sim)) # combine multiple chains
+
+## convergence diagnostics
+plot(mod_sim)
+
+gelman.diag(mod_sim)
+autocorr.diag(mod_sim)
+autocorr.plot(mod_sim)
+effectiveSize(mod_sim)
+
+dic.samples(mod, n.iter=1e3)
+
+
+```
+
+```{r}
+dic.samples(mod, n.iter=1e3)
+```
